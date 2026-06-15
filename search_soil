@@ -1,0 +1,20 @@
+import pandas as pd
+
+df = pd.read_excel("test mini.xlsx")
+
+village = input("Enter village name: ")
+
+result = df[df["Village"].str.lower() == village.lower()]
+
+if len(result) > 0:
+
+    row = result.iloc[0]
+
+    print("\n--- Soil Information ---")
+    print("Village:", row["Village"])
+    print("Soil Type:", row["Soil_Type"])
+    print("pH:", row["pH"])
+    print("Nitrogen:", row["Nitrogen"])
+
+else:
+    print("Village not found")
