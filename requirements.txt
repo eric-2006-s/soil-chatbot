@@ -5,3 +5,4 @@ groq
 openpyxl
 gspread
 google-auth
+reportlab
