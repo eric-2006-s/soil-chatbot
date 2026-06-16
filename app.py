@@ -1,16 +1,20 @@
 import streamlit as st
 import pandas as pd
 from scipy.spatial import cKDTree
+from groq import Groq
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+import io
+
+# ==========================
+# Groq Setup
+# ==========================
+groq_client = Groq(api_key="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")
 
 # ==========================
 # Load Data
 # ==========================
-df = pd.read_excel("Koppal_Union_Plot_Soil.xlsx")
-df = df.drop_duplicates()
-
-# ==========================
-# Load Organic Carbon Data
-# ==========================
+df = pd.read_excel("combined.xlsx")
 oc_df = pd.read_excel("soc attribute.xlsx")
 
 tree = cKDTree(oc_df[["latitude", "longitude"]].values)
@@ -18,7 +22,7 @@ distances, indices = tree.query(df[["latitude", "longitude"]].values, k=1)
 df["Organic_Carbon"] = oc_df.iloc[indices]["RASTERVALU"].values
 
 # ==========================
-# Single source-of-truth crop map
+# Crop Map
 # ==========================
 CROP_MAP = {
     "grape":       "Grape_Leg",
@@ -77,6 +81,12 @@ FIELD_MAP = {
     "soil phase":     "Soil_Phase",
 }
 
+COMPARE_FIELDS = [
+    "Soil_Type", "Depth_Leg", "Text_Leg", "Slope_Leg",
+    "Gravel_Leg", "Eros_Leg", "AWC", "Organic_Carbon",
+    "SoilSeries", "Soil_Phase", "Taluk", "Village"
+]
+
 # ==========================
 # Suitability Explanation
 # ==========================
@@ -85,22 +95,15 @@ def explain_suitability(code):
         return "No Data Available"
     code = str(code)
     suitability = {
-        "S1": "Highly Suitable",
-        "S2": "Moderately Suitable",
-        "S3": "Marginally Suitable",
-        "N1": "Currently Not Suitable",
-        "N2": "Permanently Not Suitable",
-        "N":  "Not Suitable",
+        "S1": "Highly Suitable", "S2": "Moderately Suitable",
+        "S3": "Marginally Suitable", "N1": "Currently Not Suitable",
+        "N2": "Permanently Not Suitable", "N": "Not Suitable",
     }
     limitations = {
-        "g": "Gravelliness/Stoniness",
-        "l": "Topography",
-        "r": "Rooting Condition",
-        "t": "Texture",
-        "w": "Drainage",
-        "n": "Nutrient Availability",
-        "e": "Erosion",
-        "z": "Excess Salt/Calcareousness",
+        "g": "Gravelliness/Stoniness", "l": "Topography",
+        "r": "Rooting Condition",      "t": "Texture",
+        "w": "Drainage",               "n": "Nutrient Availability",
+        "e": "Erosion",                "z": "Excess Salt/Calcareousness",
     }
     if code.startswith("S1"):   base = suitability["S1"]
     elif code.startswith("S2"): base = suitability["S2"]
@@ -108,14 +111,13 @@ def explain_suitability(code):
     elif code.startswith("N2"): base = suitability["N2"]
     elif code.startswith("N1"): base = suitability["N1"]
     else:                        base = suitability["N"]
-
     lims = [limitations[ch] for ch in code if ch in limitations]
     if lims:
         return f"{base}\n\nLimitations: {', '.join(lims)}"
     return base
 
 # ==========================
-# Crop Recommendation (single record)
+# Crop Recommendation
 # ==========================
 def get_suitable_crops(record):
     highly, moderate, marginal = [], [], []
@@ -125,7 +127,6 @@ def get_suitable_crops(record):
             if value.startswith("S1"):   highly.append(crop.title())
             elif value.startswith("S2"): moderate.append(crop.title())
             elif value.startswith("S3"): marginal.append(crop.title())
-
     response = "## Suitable Crops\n\n"
     if highly:   response += f"### Highly Suitable (S1)\n{', '.join(highly)}\n\n"
     if moderate: response += f"### Moderately Suitable (S2)\n{', '.join(moderate)}\n\n"
@@ -133,111 +134,166 @@ def get_suitable_crops(record):
     return response
 
 # ==========================
-# WHERE: Soil Type across dataset
+# WHERE: Soil Type
 # ==========================
 def where_soil_type(query_lower):
     col = "Soil_Type" if "soil type" in query_lower else "SoilSeries"
     soil_values = df[col].dropna().unique()
-    matched_soil = next(
-        (v for v in soil_values if str(v).lower() in query_lower), None
-    )
+    matched_soil = next((v for v in soil_values if str(v).lower() in query_lower), None)
     if not matched_soil:
-        all_types = ", ".join(sorted(map(str, soil_values)))
-        return (
-            f"Please mention a specific soil type name.\n\n"
-            f"**Available values:** {all_types}"
-        ), None
-
+        return f"Please mention a specific soil type.\n\n**Available:** {', '.join(sorted(map(str, soil_values)))}", None
     result_df = df[df[col].astype(str) == str(matched_soil)]
-    villages  = result_df["Village"].dropna().unique()
-    taluks    = result_df["Taluk"].dropna().unique()
-    map_df    = result_df[["latitude", "longitude"]].dropna()
-
+    map_df = result_df[["latitude", "longitude"]].dropna()
     response  = f"### {col.replace('_', ' ')}: **{matched_soil}**\n\n"
     response += f"**Found in:** {len(result_df)} plots\n\n"
-    response += f"**Taluks:** {', '.join(map(str, taluks))}\n\n"
-    response += f"**Villages:** {', '.join(map(str, villages))}\n\n"
+    response += f"**Taluks:** {', '.join(result_df['Taluk'].dropna().unique())}\n\n"
+    response += f"**Villages:** {', '.join(result_df['Village'].dropna().unique())}\n\n"
     return response, map_df if not map_df.empty else None
 
 # ==========================
-# WHERE: Crop across dataset
+# WHERE: Crop
 # ==========================
 def where_grow_crop(query_lower):
     matched_crop = next((c for c in CROP_MAP if c in query_lower), None)
     if not matched_crop:
-        return (
-            "Please mention a specific crop name.\n\n"
-            f"**Supported crops:** {', '.join(sorted(CROP_MAP.keys()))}"
-        ), None
-
+        return f"Please mention a specific crop.\n\n**Supported:** {', '.join(sorted(CROP_MAP.keys()))}", None
     col = CROP_MAP[matched_crop]
     if col not in df.columns:
-        return f"Column `{col}` not found in dataset.", None
-
+        return f"Column `{col}` not found.", None
     s1_df = df[df[col].astype(str).str.startswith("S1")]
     s2_df = df[df[col].astype(str).str.startswith("S2")]
     s3_df = df[df[col].astype(str).str.startswith("S3")]
-
     response  = f"### Where to Grow **{matched_crop.title()}**\n\n"
-    response += f"**Highly Suitable (S1):** {len(s1_df)} plots\n"
-    if not s1_df.empty:
-        response += f"Villages: {', '.join(s1_df['Village'].dropna().unique())}\n\n"
-
-    response += f"**Moderately Suitable (S2):** {len(s2_df)} plots\n"
-    if not s2_df.empty:
-        response += f"Villages: {', '.join(s2_df['Village'].dropna().unique())}\n\n"
-
-    response += f"**Marginally Suitable (S3):** {len(s3_df)} plots\n"
-    if not s3_df.empty:
-        response += f"Villages: {', '.join(s3_df['Village'].dropna().unique())}\n\n"
-
+    response += f"**S1 (Highly Suitable):** {len(s1_df)} plots\n"
+    if not s1_df.empty: response += f"Villages: {', '.join(s1_df['Village'].dropna().unique())}\n\n"
+    response += f"**S2 (Moderately Suitable):** {len(s2_df)} plots\n"
+    if not s2_df.empty: response += f"Villages: {', '.join(s2_df['Village'].dropna().unique())}\n\n"
+    response += f"**S3 (Marginally Suitable):** {len(s3_df)} plots\n"
+    if not s3_df.empty: response += f"Villages: {', '.join(s3_df['Village'].dropna().unique())}\n\n"
     map_df = s1_df[["latitude", "longitude"]].dropna()
     return response, map_df if not map_df.empty else None
 
 # ==========================
+# PDF Report
+# ==========================
+def generate_pdf(record):
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+
+    # Header
+    c.setFillColorRGB(0.1, 0.4, 0.1)
+    c.rect(0, height - 80, width, 80, fill=True, stroke=False)
+    c.setFillColorRGB(1, 1, 1)
+    c.setFont("Helvetica-Bold", 20)
+    c.drawString(50, height - 40, "Information Report")
+    c.setFont("Helvetica", 11)
+    c.drawString(50, height - 62, f"Survey Number: {record['SurNo_Hissa']}   |   Village: {record['Village']}   |   District: {record['KGISDistrictName']}")
+
+    # Soil Parameters Section
+    c.setFillColorRGB(0, 0, 0)
+    c.setFont("Helvetica-Bold", 13)
+    c.drawString(50, height - 110, "Soil Parameters")
+    c.setLineWidth(1)
+    c.setStrokeColorRGB(0.1, 0.4, 0.1)
+    c.line(50, height - 115, 550, height - 115)
+
+    fields = [
+        ("District",        record["KGISDistrictName"]),
+        ("Taluk",           record["Taluk"]),
+        ("Village",         record["Village"]),
+        ("Survey Number",   record["SurNo_Hissa"]),
+        ("Soil Type",       record["Soil_Type"]),
+        ("Soil Series",     record["SoilSeries"]),
+        ("Soil Phase",      record["Soil_Phase"]),
+        ("Depth",           record["Depth_Leg"]),
+        ("Texture",         record["Text_Leg"]),
+        ("Slope",           record["Slope_Leg"]),
+        ("Gravel",          record["Gravel_Leg"]),
+        ("Erosion",         record["Eros_Leg"]),
+        ("AWC",             record["AWC"]),
+        ("Organic Carbon",  record["Organic_Carbon"]),
+    ]
+
+    y = height - 135
+    for i, (label, value) in enumerate(fields):
+        if i % 2 == 0:
+            c.setFillColorRGB(0.95, 0.95, 0.95)
+            c.rect(50, y - 4, 500, 18, fill=True, stroke=False)
+        c.setFillColorRGB(0, 0, 0)
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(60, y, f"{label}:")
+        c.setFont("Helvetica", 10)
+        c.drawString(220, y, str(value))
+        y -= 20
+
+    # Crop Suitability Section
+    y -= 15
+    c.setFont("Helvetica-Bold", 13)
+    c.setFillColorRGB(0, 0, 0)
+    c.drawString(50, y, "Crop Suitability")
+    c.setStrokeColorRGB(0.1, 0.4, 0.1)
+    c.line(50, y - 5, 550, y - 5)
+    y -= 25
+
+    suitability_colors = {
+        "S1": (0.1, 0.6, 0.1),
+        "S2": (0.8, 0.6, 0.0),
+        "S3": (0.8, 0.4, 0.0),
+        "N":  (0.7, 0.0, 0.0),
+    }
+
+    for crop, col in CROP_MAP.items():
+        if col in record.index:
+            code = str(record[col])
+            c.setFont("Helvetica", 10)
+            c.setFillColorRGB(0, 0, 0)
+            c.drawString(60, y, f"{crop.title()}:")
+            color = next((v for k, v in suitability_colors.items() if code.startswith(k)), (0, 0, 0))
+            c.setFillColorRGB(*color)
+            explanation = explain_suitability(record[col]).split("\n\n")[0]  # just the suitability label
+            c.drawString(220, y, f"{code} - {explanation}")
+            y -= 15
+            if y < 60:
+                c.showPage()
+                y = height - 50
+                c.setFillColorRGB(0, 0, 0)
+
+    # Footer
+    c.setFillColorRGB(0.5, 0.5, 0.5)
+    c.setFont("Helvetica", 8)
+    c.drawString(50, 30, "Generated by GIS Soil Information Chatbot | NBSS&LUP")
+
+    c.save()
+    buffer.seek(0)
+    return buffer
+
+# ==========================
 # UI
 # ==========================
-st.title("🌱 GIS Soil Information Chatbot")
-
+st.title("SoilMitra AI – South Indian Soil Intelligence and Advisory System")
 st.sidebar.header("Dataset Information")
 st.sidebar.write(f"Total Records: {len(df)}")
 
-search_mode = st.radio(
-    "Select Search Method",
-    ["Survey Number", "Latitude & Longitude"]
-)
+search_mode = st.radio("Select Search Method", ["Survey Number", "Latitude & Longitude"])
 
 # ==========================
 # Search Mode
 # ==========================
 if search_mode == "Survey Number":
-    selected_district = st.selectbox(
-        "Select District",
-        sorted(df["KGISDistrictName"].dropna().astype(str).unique())
-    )
+    selected_district = st.selectbox("Select District", sorted(df["KGISDistrictName"].dropna().astype(str).unique()))
     district_df = df[df["KGISDistrictName"].astype(str) == selected_district]
-
-    selected_village = st.selectbox(
-        "Select Village",
-        sorted(district_df["Village"].dropna().astype(str).unique())
-    )
+    selected_village = st.selectbox("Select Village", sorted(district_df["Village"].dropna().astype(str).unique()))
     village_df = district_df[district_df["Village"].astype(str) == selected_village]
-
-    selected_survey = st.selectbox(
-        "Select Survey Number (SurNo_Hissa)",
-        sorted(village_df["SurNo_Hissa"].dropna().astype(str).unique())
-    )
+    selected_survey = st.selectbox("Select Survey Number (SurNo_Hissa)", sorted(village_df["SurNo_Hissa"].dropna().astype(str).unique()))
     record = village_df[village_df["SurNo_Hissa"].astype(str) == selected_survey].iloc[0]
-
 else:
     st.subheader("Search Using Coordinates")
-    input_lat = st.number_input("Latitude",  format="%.6f")
+    input_lat = st.number_input("Latitude", format="%.6f")
     input_lon = st.number_input("Longitude", format="%.6f")
-
     soil_tree = cKDTree(df[["latitude", "longitude"]].values)
     distance, index = soil_tree.query([[input_lat, input_lon]], k=1)
     record = df.iloc[index[0]]
-
     st.write("### Matched Location")
     st.write(f"District: {record['KGISDistrictName']}")
     st.write(f"Village: {record['Village']}")
@@ -247,14 +303,63 @@ else:
 # ==========================
 # Parcel Map
 # ==========================
-if (
-    "latitude" in record.index
-    and "longitude" in record.index
-    and pd.notna(record["latitude"])
-    and pd.notna(record["longitude"])
-):
+if "latitude" in record.index and "longitude" in record.index and pd.notna(record["latitude"]) and pd.notna(record["longitude"]):
     st.subheader("📍 Parcel Location")
     st.map(pd.DataFrame({"lat": [record["latitude"]], "lon": [record["longitude"]]}))
+
+# ==========================
+# PDF Download
+# ==========================
+st.subheader("📄 Download Soil Report")
+pdf_buffer = generate_pdf(record)
+st.download_button(
+    label="⬇️ Download PDF Report",
+    data=pdf_buffer,
+    file_name=f"soil_report_{record['SurNo_Hissa']}.pdf",
+    mime="application/pdf"
+)
+
+# ==========================
+# Compare Two Plots (UI in sidebar)
+# ==========================
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔀 Compare Two Plots")
+all_surveys = sorted(df["SurNo_Hissa"].dropna().astype(str).unique())
+compare_a = st.sidebar.selectbox("Plot A", all_surveys, key="compare_a")
+compare_b = st.sidebar.selectbox("Plot B", all_surveys, key="compare_b")
+
+if st.sidebar.button("Compare"):
+    rec_a = df[df["SurNo_Hissa"].astype(str) == compare_a].iloc[0]
+    rec_b = df[df["SurNo_Hissa"].astype(str) == compare_b].iloc[0]
+
+    st.subheader(f"📊 Comparison: {compare_a} vs {compare_b}")
+
+    rows = []
+    for col in COMPARE_FIELDS:
+        if col in df.columns:
+            rows.append({"Field": col.replace("_", " "), compare_a: rec_a[col], compare_b: rec_b[col]})
+    compare_df = pd.DataFrame(rows)
+    st.dataframe(compare_df, use_container_width=True)
+
+    st.markdown("#### Crop Suitability Comparison")
+    crop_rows = []
+    for crop, col in CROP_MAP.items():
+        if col in df.columns:
+            crop_rows.append({
+                "Crop": crop.title(),
+                compare_a: str(rec_a[col]) if col in rec_a.index else "N/A",
+                compare_b: str(rec_b[col]) if col in rec_b.index else "N/A",
+            })
+    crop_compare_df = pd.DataFrame(crop_rows)
+    st.dataframe(crop_compare_df, use_container_width=True)
+
+    map_points = pd.DataFrame({
+        "lat": [rec_a["latitude"], rec_b["latitude"]],
+        "lon": [rec_a["longitude"], rec_b["longitude"]],
+    }).dropna()
+    if not map_points.empty:
+        st.subheader("🗺️ Plot Locations")
+        st.map(map_points)
 
 # ==========================
 # Query Input
@@ -270,34 +375,18 @@ if query:
     response = None
     map_data = None
 
-    # ── 1. WHERE queries (dataset-wide) ──────────────────────────────────
+    # ── 1. WHERE queries ──────────────────────────────────────────────────
     if "where" in query_lower:
-
-        # Where is this soil type found?
         if "soil type" in query_lower or "soil series" in query_lower:
             response, map_data = where_soil_type(query_lower)
-
-        # Where can I grow X?
         elif any(w in query_lower for w in ["grow", "cultivate", "plant", "suitable for"]):
             response, map_data = where_grow_crop(query_lower)
-
-        # Where is this village / taluk / district?
         elif "village" in query_lower or "taluk" in query_lower or "district" in query_lower:
-            response = (
-                f"**District:** {record['KGISDistrictName']}\n\n"
-                f"**Taluk:** {record['Taluk']}\n\n"
-                f"**Village:** {record['Village']}"
-            )
-
+            response = f"**District:** {record['KGISDistrictName']}\n\n**Taluk:** {record['Taluk']}\n\n**Village:** {record['Village']}"
         else:
-            response = (
-                "You can ask:\n"
-                "- *Where is [soil type] found?*\n"
-                "- *Where can I grow [crop]?*\n"
-                "- *Where is this village?*"
-            )
+            response = "You can ask:\n- *Where is [soil type] found?*\n- *Where can I grow [crop]?*\n- *Where is this village?*"
 
-    # ── 2. Complete profile / summary ────────────────────────────────────
+    # ── 2. Complete profile / summary ─────────────────────────────────────
     elif any(w in query_lower for w in ["complete", "profile", "full", "all details"]):
         response = f"## Complete Profile: {record['SurNo_Hissa']}\n\n"
         for col in df.columns:
@@ -317,50 +406,65 @@ if query:
             f"**AWC:** {record['AWC']}"
         )
 
-    # ── 3. Crop recommendations for selected record ───────────────────────
+    # ── 3. Crop recommendations ────────────────────────────────────────────
     elif any(w in query_lower for w in ["what crops", "which crops", "suitable crops", "recommended crops"]):
         response = get_suitable_crops(record)
 
-    # ── 4. Individual crop suitability for selected record ────────────────
+    # ── 4. Individual crop suitability ────────────────────────────────────
     else:
         for crop, column in CROP_MAP.items():
             if crop in query_lower and column in record.index:
                 code = record[column]
-                response = (
-                    f"### {crop.title()} Suitability\n\n"
-                    f"Code: **{code}**\n\n"
-                    f"{explain_suitability(code)}"
-                )
+                response = f"### {crop.title()} Suitability\n\nCode: **{code}**\n\n{explain_suitability(code)}"
                 break
 
-    # ── 5. Soil parameter for selected record ─────────────────────────────
+    # ── 5. Soil parameter ─────────────────────────────────────────────────
     if response is None:
         for keyword, column in FIELD_MAP.items():
             if keyword in query_lower and column in record.index:
                 response = f"### {keyword.title()}\n\n{record[column]}"
                 break
 
-    # ── 6. Fallback ───────────────────────────────────────────────────────
+    # ── 6. Groq fallback ──────────────────────────────────────────────────
     if response is None:
-        response = (
-            f"## Soil Summary\n\n"
-            f"**District:** {record['KGISDistrictName']}\n\n"
-            f"**Village:** {record['Village']}\n\n"
-            f"**Survey Number:** {record['SurNo_Hissa']}\n\n"
-            f"**Taluk:** {record['Taluk']}\n\n"
-            f"**Soil Type:** {record['Soil_Type']}\n\n"
-            f"**Depth:** {record['Depth_Leg']}\n\n"
-            f"**Texture:** {record['Text_Leg']}\n\n"
-            f"**Organic Carbon:** {record['Organic_Carbon']}\n\n"
-            f"**AWC:** {record['AWC']}"
-        )
+        try:
+            soil_context = f"""You are a soil and agriculture expert. Answer based on this data:
+District: {record['KGISDistrictName']}, Village: {record['Village']}, Survey: {record['SurNo_Hissa']}
+Taluk: {record['Taluk']}, Soil Type: {record['Soil_Type']}, Depth: {record['Depth_Leg']}
+Texture: {record['Text_Leg']}, Slope: {record['Slope_Leg']}, Gravel: {record['Gravel_Leg']}
+Erosion: {record['Eros_Leg']}, Organic Carbon: {record['Organic_Carbon']}, AWC: {record['AWC']}
+Soil Series: {record['SoilSeries']}, Soil Phase: {record['Soil_Phase']}
+
+Question: {query}
+Give a concise, helpful answer."""
+            groq_response = groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": soil_context}],
+                max_tokens=500
+            )
+            response = f"🤖 **Groq (LLaMA):**\n\n{groq_response.choices[0].message.content}"
+        except Exception as e:
+            response = (
+                f"## Soil Summary\n\n"
+                f"**District:** {record['KGISDistrictName']}\n\n"
+                f"**Village:** {record['Village']}\n\n"
+                f"**Survey Number:** {record['SurNo_Hissa']}\n\n"
+                f"**Taluk:** {record['Taluk']}\n\n"
+                f"**Soil Type:** {record['Soil_Type']}\n\n"
+                f"**Depth:** {record['Depth_Leg']}\n\n"
+                f"**Texture:** {record['Text_Leg']}\n\n"
+                f"**Organic Carbon:** {record['Organic_Carbon']}\n\n"
+                f"**AWC:** {record['AWC']}\n\n"
+                f"*(Groq unavailable: {e})*"
+            )
 
     # ── Render ────────────────────────────────────────────────────────────
     if response:
         st.chat_message("assistant").write(response)
+
     if map_data is not None:
         st.subheader("🗺️ Matching Locations")
-        st.map(map_data)
+        st.map(map_data.rename(columns={"latitude": "lat", "longitude": "lon"}))
 
 # ==========================
 # Dataset Viewer

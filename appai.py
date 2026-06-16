@@ -1,29 +1,28 @@
 
-
 import streamlit as st
 import pandas as pd
 from scipy.spatial import cKDTree
 from groq import Groq
+
 
 # ==========================
 # Groq Setup
 # ==========================
 groq_client = Groq(api_key="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")
 
+
 # ==========================
 # Load Data
 # ==========================
-df = pd.read_excel("Koppal_Union_Plot_Soil.xlsx")
-df = df.drop_duplicates()
 
-# ==========================
-# Load Organic Carbon Data
-# ==========================
+df = pd.read_excel("combined.xlsx")
 oc_df = pd.read_excel("soc attribute.xlsx")
+
 
 tree = cKDTree(oc_df[["latitude", "longitude"]].values)
 distances, indices = tree.query(df[["latitude", "longitude"]].values, k=1)
 df["Organic_Carbon"] = oc_df.iloc[indices]["RASTERVALU"].values
+
 
 # ==========================
 # Crop Map
@@ -63,6 +62,7 @@ CROP_MAP = {
     "linseed":     "Lseed_Leg",
 }
 
+
 # ==========================
 # Field Map
 # ==========================
@@ -85,11 +85,13 @@ FIELD_MAP = {
     "soil phase":     "Soil_Phase",
 }
 
+
 COMPARE_FIELDS = [
     "Soil_Type", "Depth_Leg", "Text_Leg", "Slope_Leg",
     "Gravel_Leg", "Eros_Leg", "AWC", "Organic_Carbon",
     "SoilSeries", "Soil_Phase", "Taluk", "Village"
 ]
+
 
 # ==========================
 # Suitability Explanation
@@ -120,6 +122,7 @@ def explain_suitability(code):
         return f"{base}\n\nLimitations: {', '.join(lims)}"
     return base
 
+
 # ==========================
 # Crop Recommendation
 # ==========================
@@ -137,6 +140,7 @@ def get_suitable_crops(record):
     if marginal: response += f"### Marginally Suitable (S3)\n{', '.join(marginal)}"
     return response
 
+
 # ==========================
 # WHERE: Soil Type
 # ==========================
@@ -153,6 +157,7 @@ def where_soil_type(query_lower):
     response += f"**Taluks:** {', '.join(result_df['Taluk'].dropna().unique())}\n\n"
     response += f"**Villages:** {', '.join(result_df['Village'].dropna().unique())}\n\n"
     return response, map_df if not map_df.empty else None
+
 
 # ==========================
 # WHERE: Crop
@@ -177,6 +182,7 @@ def where_grow_crop(query_lower):
     map_df = s1_df[["latitude", "longitude"]].dropna()
     return response, map_df if not map_df.empty else None
 
+
 # ==========================
 # UI
 # ==========================
@@ -184,7 +190,9 @@ st.title("🌱 GIS Soil Information Chatbot")
 st.sidebar.header("Dataset Information")
 st.sidebar.write(f"Total Records: {len(df)}")
 
+
 search_mode = st.radio("Select Search Method", ["Survey Number", "Latitude & Longitude"])
+
 
 # ==========================
 # Search Mode
@@ -209,12 +217,14 @@ else:
     st.write(f"Survey Number: {record['SurNo_Hissa']}")
     st.success(f"Nearest Survey: {record['SurNo_Hissa']} (Distance = {distance[0]:.6f})")
 
+
 # ==========================
 # Parcel Map
 # ==========================
 if "latitude" in record.index and "longitude" in record.index and pd.notna(record["latitude"]) and pd.notna(record["longitude"]):
     st.subheader("📍 Parcel Location")
     st.map(pd.DataFrame({"lat": [record["latitude"]], "lon": [record["longitude"]]}))
+
 
 # ==========================
 # Compare Two Plots (UI in sidebar)
@@ -225,11 +235,14 @@ all_surveys = sorted(df["SurNo_Hissa"].dropna().astype(str).unique())
 compare_a = st.sidebar.selectbox("Plot A", all_surveys, key="compare_a")
 compare_b = st.sidebar.selectbox("Plot B", all_surveys, key="compare_b")
 
+
 if st.sidebar.button("Compare"):
     rec_a = df[df["SurNo_Hissa"].astype(str) == compare_a].iloc[0]
     rec_b = df[df["SurNo_Hissa"].astype(str) == compare_b].iloc[0]
 
+
     st.subheader(f"📊 Comparison: {compare_a} vs {compare_b}")
+
 
     rows = []
     for col in COMPARE_FIELDS:
@@ -237,6 +250,7 @@ if st.sidebar.button("Compare"):
             rows.append({"Field": col.replace("_", " "), compare_a: rec_a[col], compare_b: rec_b[col]})
     compare_df = pd.DataFrame(rows)
     st.dataframe(compare_df, use_container_width=True)
+
 
     # Crop suitability comparison
     st.markdown("#### Crop Suitability Comparison")
@@ -251,6 +265,7 @@ if st.sidebar.button("Compare"):
     crop_compare_df = pd.DataFrame(crop_rows)
     st.dataframe(crop_compare_df, use_container_width=True)
 
+
     # Map both plots
     map_points = pd.DataFrame({
         "lat": [rec_a["latitude"], rec_b["latitude"]],
@@ -260,10 +275,12 @@ if st.sidebar.button("Compare"):
         st.subheader("🗺️ Plot Locations")
         st.map(map_points)
 
+
 # ==========================
 # Query Input
 # ==========================
 query = st.text_input("Ask a question")
+
 
 # ==========================
 # Chatbot Logic
@@ -273,6 +290,7 @@ if query:
     st.chat_message("user").write(query)
     response = None
     map_data = None
+
 
     # ── 1. WHERE queries ──────────────────────────────────────────────────
     if "where" in query_lower:
@@ -285,11 +303,13 @@ if query:
         else:
             response = "You can ask:\n- *Where is [soil type] found?*\n- *Where can I grow [crop]?*\n- *Where is this village?*"
 
+
     # ── 2. Complete profile / summary ─────────────────────────────────────
     elif any(w in query_lower for w in ["complete", "profile", "full", "all details"]):
         response = f"## Complete Profile: {record['SurNo_Hissa']}\n\n"
         for col in df.columns:
             response += f"**{col}:** {record[col]}\n\n"
+
 
     elif "summary" in query_lower:
         response = (
@@ -305,9 +325,11 @@ if query:
             f"**AWC:** {record['AWC']}"
         )
 
+
     # ── 3. Crop recommendations ────────────────────────────────────────────
     elif any(w in query_lower for w in ["what crops", "which crops", "suitable crops", "recommended crops"]):
         response = get_suitable_crops(record)
+
 
     # ── 4. Individual crop suitability ────────────────────────────────────
     else:
@@ -317,12 +339,14 @@ if query:
                 response = f"### {crop.title()} Suitability\n\nCode: **{code}**\n\n{explain_suitability(code)}"
                 break
 
+
     # ── 5. Soil parameter ─────────────────────────────────────────────────
     if response is None:
         for keyword, column in FIELD_MAP.items():
             if keyword in query_lower and column in record.index:
                 response = f"### {keyword.title()}\n\n{record[column]}"
                 break
+
 
     # ── 6. Groq fallback ──────────────────────────────────────────────────
     if response is None:
@@ -333,6 +357,7 @@ Taluk: {record['Taluk']}, Soil Type: {record['Soil_Type']}, Depth: {record['Dept
 Texture: {record['Text_Leg']}, Slope: {record['Slope_Leg']}, Gravel: {record['Gravel_Leg']}
 Erosion: {record['Eros_Leg']}, Organic Carbon: {record['Organic_Carbon']}, AWC: {record['AWC']}
 Soil Series: {record['SoilSeries']}, Soil Phase: {record['Soil_Phase']}
+
 
 Question: {query}
 Give a concise, helpful answer."""
@@ -357,6 +382,7 @@ Give a concise, helpful answer."""
                 f"*(Groq unavailable: {e})*"
             )
 
+
     # ── Render ────────────────────────────────────────────────────────────
     if response:
         st.chat_message("assistant").write(response)
@@ -364,10 +390,18 @@ Give a concise, helpful answer."""
         st.subheader("🗺️ Matching Locations")
         st.map(map_data)
 
+
 # ==========================
 # Dataset Viewer
 # ==========================
 with st.expander("View Dataset"):
     st.dataframe(df)
+
+
+
+
+
+
+
 
 
