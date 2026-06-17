@@ -528,11 +528,50 @@ else:
     st.success(f"Nearest Survey: {record['SurNo_Hissa']} (Distance = {distance[0]:.6f})")
 
 # ==========================
-# Parcel Map
+# Dynamic Zoom Map
 # ==========================
 if "latitude" in record.index and "longitude" in record.index and pd.notna(record["latitude"]) and pd.notna(record["longitude"]):
     st.subheader("📍 Parcel Location")
-    st.map(pd.DataFrame({"lat": [record["latitude"]], "lon": [record["longitude"]]}))
+    
+    # Zoom level: district=9, village=12, survey=15
+    if search_mode == "Survey Number":
+        district_center = df[df["KGISDistrictName"].astype(str) == selected_district][["latitude","longitude"]].mean()
+        village_center  = village_df[["latitude","longitude"]].mean()
+        survey_lat      = record["latitude"]
+        survey_lon      = record["longitude"]
+
+        m = folium.Map(location=[survey_lat, survey_lon], zoom_start=15, tiles="CartoDB positron")
+
+        # District boundary marker
+        folium.Marker(
+            location=[district_center["latitude"], district_center["longitude"]],
+            tooltip=selected_district,
+            icon=folium.Icon(color="blue", icon="info-sign")
+        ).add_to(m)
+
+        # Village marker
+        folium.Marker(
+            location=[village_center["latitude"], village_center["longitude"]],
+            tooltip=selected_village,
+            icon=folium.Icon(color="orange", icon="home")
+        ).add_to(m)
+
+        # Survey plot marker
+        folium.Marker(
+            location=[survey_lat, survey_lon],
+            tooltip=f"Survey: {record['SurNo_Hissa']}",
+            icon=folium.Icon(color="green", icon="leaf")
+        ).add_to(m)
+
+    else:
+        m = folium.Map(location=[record["latitude"], record["longitude"]], zoom_start=15, tiles="CartoDB positron")
+        folium.Marker(
+            location=[record["latitude"], record["longitude"]],
+            tooltip=f"Survey: {record['SurNo_Hissa']}",
+            icon=folium.Icon(color="green", icon="leaf")
+        ).add_to(m)
+
+    st_folium(m, width="100%", height=450, returned_objects=[])
 
 # ==========================
 # PDF Download
