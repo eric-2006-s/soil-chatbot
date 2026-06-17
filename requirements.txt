@@ -6,3 +6,5 @@ openpyxl
 gspread
 google-auth
 reportlab
+folium
+streamlit-folium
