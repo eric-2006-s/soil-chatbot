@@ -1,28 +1,25 @@
-
 import streamlit as st
 import pandas as pd
 from scipy.spatial import cKDTree
 from groq import Groq
-
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+import io
 
 # ==========================
 # Groq Setup
 # ==========================
 groq_client = Groq(api_key="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")
 
-
 # ==========================
 # Load Data
 # ==========================
-
 df = pd.read_excel("combined.xlsx")
 oc_df = pd.read_excel("soc attribute.xlsx")
-
 
 tree = cKDTree(oc_df[["latitude", "longitude"]].values)
 distances, indices = tree.query(df[["latitude", "longitude"]].values, k=1)
 df["Organic_Carbon"] = oc_df.iloc[indices]["RASTERVALU"].values
-
 
 # ==========================
 # Crop Map
@@ -62,7 +59,6 @@ CROP_MAP = {
     "linseed":     "Lseed_Leg",
 }
 
-
 # ==========================
 # Field Map
 # ==========================
@@ -85,13 +81,11 @@ FIELD_MAP = {
     "soil phase":     "Soil_Phase",
 }
 
-
 COMPARE_FIELDS = [
     "Soil_Type", "Depth_Leg", "Text_Leg", "Slope_Leg",
     "Gravel_Leg", "Eros_Leg", "AWC", "Organic_Carbon",
     "SoilSeries", "Soil_Phase", "Taluk", "Village"
 ]
-
 
 # ==========================
 # Suitability Explanation
@@ -122,7 +116,6 @@ def explain_suitability(code):
         return f"{base}\n\nLimitations: {', '.join(lims)}"
     return base
 
-
 # ==========================
 # Crop Recommendation
 # ==========================
@@ -140,7 +133,6 @@ def get_suitable_crops(record):
     if marginal: response += f"### Marginally Suitable (S3)\n{', '.join(marginal)}"
     return response
 
-
 # ==========================
 # WHERE: Soil Type
 # ==========================
@@ -157,7 +149,6 @@ def where_soil_type(query_lower):
     response += f"**Taluks:** {', '.join(result_df['Taluk'].dropna().unique())}\n\n"
     response += f"**Villages:** {', '.join(result_df['Village'].dropna().unique())}\n\n"
     return response, map_df if not map_df.empty else None
-
 
 # ==========================
 # WHERE: Crop
@@ -182,17 +173,322 @@ def where_grow_crop(query_lower):
     map_df = s1_df[["latitude", "longitude"]].dropna()
     return response, map_df if not map_df.empty else None
 
+# ==========================
+# PDF Report
+# ==========================
+def generate_pdf(record):
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+
+    c.setFillColorRGB(0.1, 0.4, 0.1)
+    c.rect(0, height - 80, width, 80, fill=True, stroke=False)
+    c.setFillColorRGB(1, 1, 1)
+    c.setFont("Helvetica-Bold", 20)
+    c.drawString(50, height - 40, "Information Report")
+    c.setFont("Helvetica", 11)
+    c.drawString(50, height - 62, f"Survey Number: {record['SurNo_Hissa']}   |   Village: {record['Village']}   |   District: {record['KGISDistrictName']}")
+
+    c.setFillColorRGB(0, 0, 0)
+    c.setFont("Helvetica-Bold", 13)
+    c.drawString(50, height - 110, "Soil Parameters")
+    c.setLineWidth(1)
+    c.setStrokeColorRGB(0.1, 0.4, 0.1)
+    c.line(50, height - 115, 550, height - 115)
+
+    fields = [
+        ("District",        record["KGISDistrictName"]),
+        ("Taluk",           record["Taluk"]),
+        ("Village",         record["Village"]),
+        ("Survey Number",   record["SurNo_Hissa"]),
+        ("Soil Type",       record["Soil_Type"]),
+        ("Soil Series",     record["SoilSeries"]),
+        ("Soil Phase",      record["Soil_Phase"]),
+        ("Depth",           record["Depth_Leg"]),
+        ("Texture",         record["Text_Leg"]),
+        ("Slope",           record["Slope_Leg"]),
+        ("Gravel",          record["Gravel_Leg"]),
+        ("Erosion",         record["Eros_Leg"]),
+        ("AWC",             record["AWC"]),
+        ("Organic Carbon",  record["Organic_Carbon"]),
+    ]
+
+    y = height - 135
+    for i, (label, value) in enumerate(fields):
+        if i % 2 == 0:
+            c.setFillColorRGB(0.95, 0.95, 0.95)
+            c.rect(50, y - 4, 500, 18, fill=True, stroke=False)
+        c.setFillColorRGB(0, 0, 0)
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(60, y, f"{label}:")
+        c.setFont("Helvetica", 10)
+        c.drawString(220, y, str(value))
+        y -= 20
+
+    y -= 15
+    c.setFont("Helvetica-Bold", 13)
+    c.setFillColorRGB(0, 0, 0)
+    c.drawString(50, y, "Crop Suitability")
+    c.setStrokeColorRGB(0.1, 0.4, 0.1)
+    c.line(50, y - 5, 550, y - 5)
+    y -= 25
+
+    suitability_colors = {
+        "S1": (0.1, 0.6, 0.1),
+        "S2": (0.8, 0.6, 0.0),
+        "S3": (0.8, 0.4, 0.0),
+        "N":  (0.7, 0.0, 0.0),
+    }
+
+    for crop, col in CROP_MAP.items():
+        if col in record.index:
+            code = str(record[col])
+            c.setFont("Helvetica", 10)
+            c.setFillColorRGB(0, 0, 0)
+            c.drawString(60, y, f"{crop.title()}:")
+            color = next((v for k, v in suitability_colors.items() if code.startswith(k)), (0, 0, 0))
+            c.setFillColorRGB(*color)
+            explanation = explain_suitability(record[col]).split("\n\n")[0]
+            c.drawString(220, y, f"{code} - {explanation}")
+            y -= 15
+            if y < 60:
+                c.showPage()
+                y = height - 50
+                c.setFillColorRGB(0, 0, 0)
+
+    c.setFillColorRGB(0.5, 0.5, 0.5)
+    c.setFont("Helvetica", 8)
+    c.drawString(50, 30, "Generated by GIS Soil Information Chatbot | NBSS&LUP")
+
+    c.save()
+    buffer.seek(0)
+    return buffer
 
 # ==========================
 # UI
 # ==========================
-st.title("🌱 GIS Soil Information Chatbot")
+st.set_page_config(page_title="SoilMitra AI", page_icon="🌱", layout="wide")
+
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+/* ── Global ── */
+html, body, [class*="css"] {
+    font-family: 'Inter', sans-serif !important;
+    color: #1a3a1a !important;
+}
+
+.stApp {
+    background-color: #f5f7f0 !important;
+}
+
+/* ── All text override ── */
+p, div, span, label, li, td, th, a {
+    color: #1a3a1a !important;
+}
+
+/* ── Headings ── */
+h1 {
+    color: #1a4d1a !important;
+    font-weight: 700 !important;
+    font-size: 1.9rem !important;
+    border-bottom: 3px solid #4caf50;
+    padding-bottom: 10px;
+    margin-bottom: 20px !important;
+}
+
+h2 { color: #1a4d1a !important; font-weight: 700 !important; }
+h3 { color: #2e6b2e !important; font-weight: 600 !important; }
+
+/* ── Sidebar ── */
+section[data-testid="stSidebar"] {
+    background-color: #1a3a1a !important;
+}
+
+section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] div,
+section[data-testid="stSidebar"] span,
+section[data-testid="stSidebar"] label {
+    color: #d4edda !important;
+}
+
+section[data-testid="stSidebar"] h2,
+section[data-testid="stSidebar"] h3 {
+    color: #90ee90 !important;
+    border-bottom: 1px solid #4caf50;
+    padding-bottom: 4px;
+}
+
+/* ── Radio ── */
+.stRadio > label > div > p {
+    color: #1a3a1a !important;
+    font-weight: 600 !important;
+    font-size: 1rem !important;
+}
+
+div[role="radiogroup"] label p,
+div[role="radiogroup"] label span,
+div[role="radiogroup"] label {
+    color: #1a3a1a !important;
+    font-weight: 500 !important;
+}
+
+/* ── Selectbox ── */
+.stSelectbox label p,
+.stSelectbox label {
+    color: #1a3a1a !important;
+    font-weight: 600 !important;
+}
+
+.stSelectbox > div > div {
+    border: 1.5px solid #a5d6a7 !important;
+    border-radius: 8px !important;
+    background-color: #ffffff !important;
+}
+
+.stSelectbox div[data-baseweb="select"] span,
+.stSelectbox div[data-baseweb="select"] div {
+    color: #1a3a1a !important;
+    font-weight: 700 !important;
+}
+
+/* ── Text & Number Input ── */
+.stTextInput label p,
+.stTextInput label,
+.stNumberInput label p,
+.stNumberInput label {
+    color: #1a3a1a !important;
+    font-weight: 600 !important;
+}
+
+.stTextInput > div > div > input,
+.stNumberInput > div > div > input {
+    border: 1.5px solid #a5d6a7 !important;
+    border-radius: 8px !important;
+    background-color: #ffffff !important;
+    color: #1a3a1a !important;
+     font-weight: 700 !important;
+}
+
+.stTextInput > div > div > input:focus,
+.stNumberInput > div > div > input:focus {
+    border-color: #4caf50 !important;
+    box-shadow: 0 0 0 2px rgba(76,175,80,0.2) !important;
+}
+
+/* ── Buttons ── */
+.stButton > button {
+    background-color: #2e7d32 !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    padding: 0.5rem 1.5rem !important;
+    transition: background-color 0.2s ease;
+}
+
+.stButton > button:hover {
+    background-color: #1b5e20 !important;
+    color: white !important;
+}
+
+.stButton > button p {
+    color: white !important;
+}
+
+/* ── Download Button ── */
+.stDownloadButton > button {
+    background-color: #388e3c !important;
+    color: white !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    border: none !important;
+}
+
+.stDownloadButton > button:hover {
+    background-color: #1b5e20 !important;
+    color: white !important;
+}
+
+.stDownloadButton > button p {
+    color: white !important;
+}
+
+/* ── Chat messages ── */
+[data-testid="stChatMessage"] {
+    border-radius: 12px !important;
+    padding: 12px 16px !important;
+    margin-bottom: 8px !important;
+    border: 1px solid #c8e6c9 !important;
+    background-color: #ffffff !important;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+
+[data-testid="stChatMessage"] p,
+[data-testid="stChatMessage"] div,
+[data-testid="stChatMessage"] span {
+    color: #1a3a1a !important;
+}
+
+/* ── Markdown text ── */
+.stMarkdown p,
+.stMarkdown li,
+.stMarkdown span,
+.stMarkdown div {
+    color: #1a3a1a !important;
+}
+
+/* ── Success / Info boxes ── */
+.stSuccess, div[data-testid="stNotification"] {
+    background-color: #e8f5e9 !important;
+    border-left: 4px solid #4caf50 !important;
+    border-radius: 6px !important;
+    color: #1a3a1a !important;
+}
+
+/* ── Write / st.write output ── */
+[data-testid="stText"] {
+    color: #1a3a1a !important;
+    font-weight: 500 !important;
+}
+
+/* ── Dataframe ── */
+.stDataFrame {
+    border: 1px solid #c8e6c9 !important;
+    border-radius: 8px !important;
+    overflow: hidden;
+}
+
+/* ── Expander ── */
+.streamlit-expander {
+    border: 1px solid #c8e6c9 !important;
+    border-radius: 8px !important;
+    background: white !important;
+}
+
+details summary p {
+    color: #1a3a1a !important;
+    font-weight: 600 !important;
+}
+
+/* ── Dividers ── */
+hr {
+    border-color: #c8e6c9 !important;
+}
+
+/* ── Subheader ── */
+[data-testid="stSubheader"] {
+    color: #1a4d1a !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🌱 SoilMitra AI – South Indian Soil Intelligence and Advisory System")
 st.sidebar.header("Dataset Information")
 st.sidebar.write(f"Total Records: {len(df)}")
 
-
 search_mode = st.radio("Select Search Method", ["Survey Number", "Latitude & Longitude"])
-
 
 # ==========================
 # Search Mode
@@ -206,7 +502,7 @@ if search_mode == "Survey Number":
     record = village_df[village_df["SurNo_Hissa"].astype(str) == selected_survey].iloc[0]
 else:
     st.subheader("Search Using Coordinates")
-    input_lat = st.number_input("Latitude",  format="%.6f")
+    input_lat = st.number_input("Latitude", format="%.6f")
     input_lon = st.number_input("Longitude", format="%.6f")
     soil_tree = cKDTree(df[["latitude", "longitude"]].values)
     distance, index = soil_tree.query([[input_lat, input_lon]], k=1)
@@ -217,7 +513,6 @@ else:
     st.write(f"Survey Number: {record['SurNo_Hissa']}")
     st.success(f"Nearest Survey: {record['SurNo_Hissa']} (Distance = {distance[0]:.6f})")
 
-
 # ==========================
 # Parcel Map
 # ==========================
@@ -225,6 +520,17 @@ if "latitude" in record.index and "longitude" in record.index and pd.notna(recor
     st.subheader("📍 Parcel Location")
     st.map(pd.DataFrame({"lat": [record["latitude"]], "lon": [record["longitude"]]}))
 
+# ==========================
+# PDF Download
+# ==========================
+st.subheader("📄 Download Soil Report")
+pdf_buffer = generate_pdf(record)
+st.download_button(
+    label="⬇️ Download PDF Report",
+    data=pdf_buffer,
+    file_name=f"soil_report_{record['SurNo_Hissa']}.pdf",
+    mime="application/pdf"
+)
 
 # ==========================
 # Compare Two Plots (UI in sidebar)
@@ -235,14 +541,11 @@ all_surveys = sorted(df["SurNo_Hissa"].dropna().astype(str).unique())
 compare_a = st.sidebar.selectbox("Plot A", all_surveys, key="compare_a")
 compare_b = st.sidebar.selectbox("Plot B", all_surveys, key="compare_b")
 
-
 if st.sidebar.button("Compare"):
     rec_a = df[df["SurNo_Hissa"].astype(str) == compare_a].iloc[0]
     rec_b = df[df["SurNo_Hissa"].astype(str) == compare_b].iloc[0]
 
-
     st.subheader(f"📊 Comparison: {compare_a} vs {compare_b}")
-
 
     rows = []
     for col in COMPARE_FIELDS:
@@ -251,8 +554,6 @@ if st.sidebar.button("Compare"):
     compare_df = pd.DataFrame(rows)
     st.dataframe(compare_df, use_container_width=True)
 
-
-    # Crop suitability comparison
     st.markdown("#### Crop Suitability Comparison")
     crop_rows = []
     for crop, col in CROP_MAP.items():
@@ -265,8 +566,6 @@ if st.sidebar.button("Compare"):
     crop_compare_df = pd.DataFrame(crop_rows)
     st.dataframe(crop_compare_df, use_container_width=True)
 
-
-    # Map both plots
     map_points = pd.DataFrame({
         "lat": [rec_a["latitude"], rec_b["latitude"]],
         "lon": [rec_a["longitude"], rec_b["longitude"]],
@@ -275,12 +574,10 @@ if st.sidebar.button("Compare"):
         st.subheader("🗺️ Plot Locations")
         st.map(map_points)
 
-
 # ==========================
 # Query Input
 # ==========================
-query = st.text_input("Ask a question")
-
+query = st.text_input("💬 Ask a question about this soil plot")
 
 # ==========================
 # Chatbot Logic
@@ -290,7 +587,6 @@ if query:
     st.chat_message("user").write(query)
     response = None
     map_data = None
-
 
     # ── 1. WHERE queries ──────────────────────────────────────────────────
     if "where" in query_lower:
@@ -303,13 +599,11 @@ if query:
         else:
             response = "You can ask:\n- *Where is [soil type] found?*\n- *Where can I grow [crop]?*\n- *Where is this village?*"
 
-
     # ── 2. Complete profile / summary ─────────────────────────────────────
     elif any(w in query_lower for w in ["complete", "profile", "full", "all details"]):
         response = f"## Complete Profile: {record['SurNo_Hissa']}\n\n"
         for col in df.columns:
             response += f"**{col}:** {record[col]}\n\n"
-
 
     elif "summary" in query_lower:
         response = (
@@ -325,11 +619,9 @@ if query:
             f"**AWC:** {record['AWC']}"
         )
 
-
     # ── 3. Crop recommendations ────────────────────────────────────────────
-    elif any(w in query_lower for w in ["what crops", "which crops", "suitable crops", "recommended crops"]):
+    elif any(w in query_lower for w in ["what crops", "which crops", "suitable crops", "recommended crops", "suitability", "crop suitability", "all crops"]):
         response = get_suitable_crops(record)
-
 
     # ── 4. Individual crop suitability ────────────────────────────────────
     else:
@@ -339,14 +631,12 @@ if query:
                 response = f"### {crop.title()} Suitability\n\nCode: **{code}**\n\n{explain_suitability(code)}"
                 break
 
-
     # ── 5. Soil parameter ─────────────────────────────────────────────────
     if response is None:
         for keyword, column in FIELD_MAP.items():
             if keyword in query_lower and column in record.index:
                 response = f"### {keyword.title()}\n\n{record[column]}"
                 break
-
 
     # ── 6. Groq fallback ──────────────────────────────────────────────────
     if response is None:
@@ -357,7 +647,6 @@ Taluk: {record['Taluk']}, Soil Type: {record['Soil_Type']}, Depth: {record['Dept
 Texture: {record['Text_Leg']}, Slope: {record['Slope_Leg']}, Gravel: {record['Gravel_Leg']}
 Erosion: {record['Eros_Leg']}, Organic Carbon: {record['Organic_Carbon']}, AWC: {record['AWC']}
 Soil Series: {record['SoilSeries']}, Soil Phase: {record['Soil_Phase']}
-
 
 Question: {query}
 Give a concise, helpful answer."""
@@ -382,26 +671,16 @@ Give a concise, helpful answer."""
                 f"*(Groq unavailable: {e})*"
             )
 
-
     # ── Render ────────────────────────────────────────────────────────────
     if response:
         st.chat_message("assistant").write(response)
+
     if map_data is not None:
         st.subheader("🗺️ Matching Locations")
-        st.map(map_data)
-
+        st.map(map_data.rename(columns={"latitude": "lat", "longitude": "lon"}))
 
 # ==========================
 # Dataset Viewer
 # ==========================
-with st.expander("View Dataset"):
+with st.expander("📂 View Dataset"):
     st.dataframe(df)
-
-
-
-
-
-
-
-
-
