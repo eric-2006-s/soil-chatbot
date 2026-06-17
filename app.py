@@ -642,7 +642,7 @@ if query:
             heatmap_obj, err = soil_suitability_heatmap(matched_crop)
             if heatmap_obj:
                 st.chat_message("assistant").write(f"### 🌡️ Suitability Heatmap: {matched_crop.title()}\n\nRed = Highly Suitable (S1) · Orange = Moderate (S2) · Yellow = Marginal (S3)")
-                st_folium(heatmap_obj, width=750, height=450)
+                st_folium(heatmap_obj, width="100%", height=500, returned_objects=[])
                 response = "__rendered__"
             else:
                 response = err
