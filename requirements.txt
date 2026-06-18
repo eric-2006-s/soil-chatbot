@@ -2,9 +2,10 @@ streamlit
 pandas
 scipy
 groq
-openpyxl
-gspread
-google-auth
 reportlab
 folium
 streamlit-folium
+streamlit-mic-recorder
+gtts
+deep-translator
+openpyxl

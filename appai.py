@@ -5,21 +5,39 @@ from groq import Groq
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 import io
+import folium
+from folium.plugins import HeatMap
+from streamlit_folium import st_folium
+
+from streamlit_mic_recorder import mic_recorder
+from gtts import gTTS
+from deep_translator import GoogleTranslator
+import tempfile
+
 
 # ==========================
 # Groq Setup
 # ==========================
-groq_client = Groq(api_key="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")
+groq_client = Groq(api_key="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")
 
 # ==========================
-# Load Data
+# Load Data (Cached)
 # ==========================
-df = pd.read_excel("combined.xlsx")
-oc_df = pd.read_excel("soc attribute.xlsx")
+@st.cache_data
+def load_data():
+    df = pd.read_excel("combined.xlsx")
+    oc_df = pd.read_excel("soc attribute.xlsx")
+    tree = cKDTree(oc_df[["latitude", "longitude"]].values)
+    distances, indices = tree.query(df[["latitude", "longitude"]].values, k=1)
+    df["Organic_Carbon"] = oc_df.iloc[indices]["RASTERVALU"].values
+    return df
 
-tree = cKDTree(oc_df[["latitude", "longitude"]].values)
-distances, indices = tree.query(df[["latitude", "longitude"]].values, k=1)
-df["Organic_Carbon"] = oc_df.iloc[indices]["RASTERVALU"].values
+@st.cache_resource
+def get_soil_tree(_df):
+    return cKDTree(_df[["latitude", "longitude"]].values)
+
+df = load_data()
+soil_tree = get_soil_tree(df)
 
 # ==========================
 # Crop Map
@@ -174,6 +192,62 @@ def where_grow_crop(query_lower):
     return response, map_df if not map_df.empty else None
 
 # ==========================
+# Crop Suitability Heatmap
+# ==========================
+@st.cache_data
+def soil_suitability_heatmap(crop_name):
+    col = CROP_MAP.get(crop_name)
+    if not col or col not in df.columns:
+        return None, f"Crop `{crop_name}` not found."
+    weight_map = {"S1": 1.0, "S2": 0.6, "S3": 0.3}
+    heat_df = df[["latitude", "longitude", col]].dropna().copy()
+    heat_df["weight"] = heat_df[col].astype(str).apply(
+        lambda x: next((v for k, v in weight_map.items() if x.startswith(k)), 0)
+    )
+    heat_df = heat_df[heat_df["weight"] > 0]
+    if heat_df.empty:
+        return None, f"No suitable plots found for {crop_name.title()}."
+    center = [heat_df["latitude"].mean(), heat_df["longitude"].mean()]
+    m = folium.Map(location=center, zoom_start=10, tiles="CartoDB positron")
+    HeatMap(
+        heat_df[["latitude", "longitude", "weight"]].values.tolist(),
+        min_opacity=0.3,
+        radius=20,
+        blur=15,
+        gradient={"0.3": "#ffffb2", "0.6": "#fd8d3c", "1.0": "#bd0026"}
+    ).add_to(m)
+    folium.LayerControl().add_to(m)
+    return m, None
+
+# ==========================
+# Organic Carbon Heatmap
+# ==========================
+@st.cache_data
+def organic_carbon_heatmap():
+    oc_df = df[["latitude", "longitude", "Organic_Carbon"]].dropna().copy()
+    oc_df["Organic_Carbon"] = pd.to_numeric(oc_df["Organic_Carbon"], errors="coerce")
+    oc_df = oc_df.dropna(subset=["Organic_Carbon"])
+
+    if oc_df.empty:
+        return None, "No numeric organic carbon data available."
+
+    oc_min = oc_df["Organic_Carbon"].min()
+    oc_max = oc_df["Organic_Carbon"].max()
+    oc_df["weight"] = (oc_df["Organic_Carbon"] - oc_min) / (oc_max - oc_min + 1e-9)
+
+    center = [oc_df["latitude"].mean(), oc_df["longitude"].mean()]
+    m = folium.Map(location=center, zoom_start=10, tiles="CartoDB positron")
+    HeatMap(
+        oc_df[["latitude", "longitude", "weight"]].values.tolist(),
+        min_opacity=0.3,
+        radius=20,
+        blur=15,
+        gradient={"0.3": "#ffffb2", "0.6": "#fd8d3c", "1.0": "#bd0026"}
+    ).add_to(m)
+    folium.LayerControl().add_to(m)
+    return m, None
+
+# ==========================
 # PDF Report
 # ==========================
 def generate_pdf(record):
@@ -273,7 +347,6 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
-/* ── Global ── */
 html, body, [class*="css"] {
     font-family: 'Inter', sans-serif !important;
     color: #1a3a1a !important;
@@ -283,12 +356,10 @@ html, body, [class*="css"] {
     background-color: #f5f7f0 !important;
 }
 
-/* ── All text override ── */
 p, div, span, label, li, td, th, a {
     color: #1a3a1a !important;
 }
 
-/* ── Headings ── */
 h1 {
     color: #1a4d1a !important;
     font-weight: 700 !important;
@@ -301,9 +372,8 @@ h1 {
 h2 { color: #1a4d1a !important; font-weight: 700 !important; }
 h3 { color: #2e6b2e !important; font-weight: 600 !important; }
 
-/* ── Sidebar ── */
 section[data-testid="stSidebar"] {
-    background-color: #1a3a1a !important;
+    background-color: #2d5a2d !important;
 }
 
 section[data-testid="stSidebar"] p,
@@ -320,7 +390,6 @@ section[data-testid="stSidebar"] h3 {
     padding-bottom: 4px;
 }
 
-/* ── Radio ── */
 .stRadio > label > div > p {
     color: #1a3a1a !important;
     font-weight: 600 !important;
@@ -334,7 +403,6 @@ div[role="radiogroup"] label {
     font-weight: 500 !important;
 }
 
-/* ── Selectbox ── */
 .stSelectbox label p,
 .stSelectbox label {
     color: #1a3a1a !important;
@@ -353,7 +421,6 @@ div[role="radiogroup"] label {
     font-weight: 700 !important;
 }
 
-/* ── Text & Number Input ── */
 .stTextInput label p,
 .stTextInput label,
 .stNumberInput label p,
@@ -368,7 +435,7 @@ div[role="radiogroup"] label {
     border-radius: 8px !important;
     background-color: #ffffff !important;
     color: #1a3a1a !important;
-     font-weight: 700 !important;
+    font-weight: 700 !important;
 }
 
 .stTextInput > div > div > input:focus,
@@ -377,7 +444,6 @@ div[role="radiogroup"] label {
     box-shadow: 0 0 0 2px rgba(76,175,80,0.2) !important;
 }
 
-/* ── Buttons ── */
 .stButton > button {
     background-color: #2e7d32 !important;
     color: white !important;
@@ -393,11 +459,8 @@ div[role="radiogroup"] label {
     color: white !important;
 }
 
-.stButton > button p {
-    color: white !important;
-}
+.stButton > button p { color: white !important; }
 
-/* ── Download Button ── */
 .stDownloadButton > button {
     background-color: #388e3c !important;
     color: white !important;
@@ -411,11 +474,8 @@ div[role="radiogroup"] label {
     color: white !important;
 }
 
-.stDownloadButton > button p {
-    color: white !important;
-}
+.stDownloadButton > button p { color: white !important; }
 
-/* ── Chat messages ── */
 [data-testid="stChatMessage"] {
     border-radius: 12px !important;
     padding: 12px 16px !important;
@@ -431,7 +491,6 @@ div[role="radiogroup"] label {
     color: #1a3a1a !important;
 }
 
-/* ── Markdown text ── */
 .stMarkdown p,
 .stMarkdown li,
 .stMarkdown span,
@@ -439,7 +498,6 @@ div[role="radiogroup"] label {
     color: #1a3a1a !important;
 }
 
-/* ── Success / Info boxes ── */
 .stSuccess, div[data-testid="stNotification"] {
     background-color: #e8f5e9 !important;
     border-left: 4px solid #4caf50 !important;
@@ -447,20 +505,17 @@ div[role="radiogroup"] label {
     color: #1a3a1a !important;
 }
 
-/* ── Write / st.write output ── */
 [data-testid="stText"] {
     color: #1a3a1a !important;
     font-weight: 500 !important;
 }
 
-/* ── Dataframe ── */
 .stDataFrame {
     border: 1px solid #c8e6c9 !important;
     border-radius: 8px !important;
     overflow: hidden;
 }
 
-/* ── Expander ── */
 .streamlit-expander {
     border: 1px solid #c8e6c9 !important;
     border-radius: 8px !important;
@@ -472,15 +527,9 @@ details summary p {
     font-weight: 600 !important;
 }
 
-/* ── Dividers ── */
-hr {
-    border-color: #c8e6c9 !important;
-}
+hr { border-color: #c8e6c9 !important; }
 
-/* ── Subheader ── */
-[data-testid="stSubheader"] {
-    color: #1a4d1a !important;
-}
+[data-testid="stSubheader"] { color: #1a4d1a !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -504,7 +553,6 @@ else:
     st.subheader("Search Using Coordinates")
     input_lat = st.number_input("Latitude", format="%.6f")
     input_lon = st.number_input("Longitude", format="%.6f")
-    soil_tree = cKDTree(df[["latitude", "longitude"]].values)
     distance, index = soil_tree.query([[input_lat, input_lon]], k=1)
     record = df.iloc[index[0]]
     st.write("### Matched Location")
@@ -514,11 +562,46 @@ else:
     st.success(f"Nearest Survey: {record['SurNo_Hissa']} (Distance = {distance[0]:.6f})")
 
 # ==========================
-# Parcel Map
+# Dynamic Zoom Map
 # ==========================
 if "latitude" in record.index and "longitude" in record.index and pd.notna(record["latitude"]) and pd.notna(record["longitude"]):
     st.subheader("📍 Parcel Location")
-    st.map(pd.DataFrame({"lat": [record["latitude"]], "lon": [record["longitude"]]}))
+
+    if search_mode == "Survey Number":
+        district_center = df[df["KGISDistrictName"].astype(str) == selected_district][["latitude","longitude"]].mean()
+        village_center  = village_df[["latitude","longitude"]].mean()
+        survey_lat      = record["latitude"]
+        survey_lon      = record["longitude"]
+
+        m = folium.Map(location=[survey_lat, survey_lon], zoom_start=15, tiles="CartoDB positron")
+
+        folium.Marker(
+            location=[district_center["latitude"], district_center["longitude"]],
+            tooltip=selected_district,
+            icon=folium.Icon(color="blue", icon="info-sign")
+        ).add_to(m)
+
+        folium.Marker(
+            location=[village_center["latitude"], village_center["longitude"]],
+            tooltip=selected_village,
+            icon=folium.Icon(color="orange", icon="home")
+        ).add_to(m)
+
+        folium.Marker(
+            location=[survey_lat, survey_lon],
+            tooltip=f"Survey: {record['SurNo_Hissa']}",
+            icon=folium.Icon(color="green", icon="leaf")
+        ).add_to(m)
+
+    else:
+        m = folium.Map(location=[record["latitude"], record["longitude"]], zoom_start=15, tiles="CartoDB positron")
+        folium.Marker(
+            location=[record["latitude"], record["longitude"]],
+            tooltip=f"Survey: {record['SurNo_Hissa']}",
+            icon=folium.Icon(color="green", icon="leaf")
+        ).add_to(m)
+
+    st_folium(m, width="100%", height=450, returned_objects=[])
 
 # ==========================
 # PDF Download
@@ -533,7 +616,7 @@ st.download_button(
 )
 
 # ==========================
-# Compare Two Plots (UI in sidebar)
+# Compare Two Plots
 # ==========================
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔀 Compare Two Plots")
@@ -551,8 +634,7 @@ if st.sidebar.button("Compare"):
     for col in COMPARE_FIELDS:
         if col in df.columns:
             rows.append({"Field": col.replace("_", " "), compare_a: rec_a[col], compare_b: rec_b[col]})
-    compare_df = pd.DataFrame(rows)
-    st.dataframe(compare_df, use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
     st.markdown("#### Crop Suitability Comparison")
     crop_rows = []
@@ -563,8 +645,7 @@ if st.sidebar.button("Compare"):
                 compare_a: str(rec_a[col]) if col in rec_a.index else "N/A",
                 compare_b: str(rec_b[col]) if col in rec_b.index else "N/A",
             })
-    crop_compare_df = pd.DataFrame(crop_rows)
-    st.dataframe(crop_compare_df, use_container_width=True)
+    st.dataframe(pd.DataFrame(crop_rows), use_container_width=True)
 
     map_points = pd.DataFrame({
         "lat": [rec_a["latitude"], rec_b["latitude"]],
@@ -574,10 +655,60 @@ if st.sidebar.button("Compare"):
         st.subheader("🗺️ Plot Locations")
         st.map(map_points)
 
+
+# ==========================
+# Voice Helpers
+# ==========================
+def speak_text(text):
+    try:
+        tts = gTTS(text=str(text))
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
+            tts.save(fp.name)
+            return fp.name
+    except Exception:
+        return None
+
+voice_query = None
+st.subheader("🎤 Voice input")
+audio = mic_recorder(
+    start_prompt="🎙️ Start Recording",
+    stop_prompt="⏹️ Stop Recording",
+    just_once=True,
+    use_container_width=True
+)
+
+if audio:
+    try:
+        st.audio(audio["bytes"])
+        with open("voice.wav", "wb") as f:
+            f.write(audio["bytes"])
+
+        transcription = groq_client.audio.transcriptions.create(
+            file=open("voice.wav", "rb"),
+            model="whisper-large-v3"
+        )
+
+        voice_query = transcription.text
+
+        try:
+            voice_query = GoogleTranslator(
+                source="auto",
+                target="en"
+            ).translate(voice_query)
+        except Exception:
+            pass
+
+        st.success(f"You said: {voice_query}")
+
+    except Exception as e:
+        st.error(f"Voice recognition error: {e}")
+
+
 # ==========================
 # Query Input
 # ==========================
-query = st.text_input("💬 Ask a question about this soil plot")
+text_query = st.text_input("💬 Ask a question about this soil plot")
+query = voice_query if voice_query else text_query
 
 # ==========================
 # Chatbot Logic
@@ -623,7 +754,46 @@ if query:
     elif any(w in query_lower for w in ["what crops", "which crops", "suitable crops", "recommended crops", "suitability", "crop suitability", "all crops"]):
         response = get_suitable_crops(record)
 
-    # ── 4. Individual crop suitability ────────────────────────────────────
+    # ── 4. Heatmap ────────────────────────────────────────────────────────
+    elif "heatmap" in query_lower:
+        # Organic Carbon heatmap
+        if "organic carbon" in query_lower or " oc " in query_lower or query_lower.strip() in ["heatmap oc", "oc heatmap", "organic carbon heatmap", "heatmap organic carbon"]:
+            heatmap_obj, err = organic_carbon_heatmap()
+            if heatmap_obj:
+                st.chat_message("assistant").write(
+                    "### 🌡️ Organic Carbon Heatmap\n\n"
+                    "Red = High OC · Orange = Medium · Yellow = Low\n\n"
+                    f"Range across dataset: {df['Organic_Carbon'].min():.3f} – {df['Organic_Carbon'].max():.3f}"
+                )
+                st_folium(heatmap_obj, width="100%", height=500, returned_objects=[])
+                response = "__rendered__"
+            else:
+                response = err
+
+        # Crop suitability heatmap
+        else:
+            matched_crop = next((c for c in CROP_MAP if c in query_lower), None)
+            if matched_crop:
+                heatmap_obj, err = soil_suitability_heatmap(matched_crop)
+                if heatmap_obj:
+                    st.chat_message("assistant").write(
+                        f"### 🌡️ Suitability Heatmap: {matched_crop.title()}\n\n"
+                        "Red = Highly Suitable (S1) · Orange = Moderate (S2) · Yellow = Marginal (S3)"
+                    )
+                    st_folium(heatmap_obj, width="100%", height=500, returned_objects=[])
+                    response = "__rendered__"
+                else:
+                    response = err
+            else:
+                response = (
+                    f"Mention a crop name or 'organic carbon'.\n\n"
+                    f"**Examples:**\n"
+                    f"- *heatmap for maize*\n"
+                    f"- *organic carbon heatmap*\n\n"
+                    f"**Supported crops:** {', '.join(sorted(CROP_MAP.keys()))}"
+                )
+
+    # ── 5. Individual crop suitability ────────────────────────────────────
     else:
         for crop, column in CROP_MAP.items():
             if crop in query_lower and column in record.index:
@@ -631,14 +801,14 @@ if query:
                 response = f"### {crop.title()} Suitability\n\nCode: **{code}**\n\n{explain_suitability(code)}"
                 break
 
-    # ── 5. Soil parameter ─────────────────────────────────────────────────
+    # ── 6. Soil parameter ─────────────────────────────────────────────────
     if response is None:
         for keyword, column in FIELD_MAP.items():
             if keyword in query_lower and column in record.index:
                 response = f"### {keyword.title()}\n\n{record[column]}"
                 break
 
-    # ── 6. Groq fallback ──────────────────────────────────────────────────
+    # ── 7. Groq fallback ──────────────────────────────────────────────────
     if response is None:
         try:
             soil_context = f"""You are a soil and agriculture expert. Answer based on this data:
@@ -672,8 +842,12 @@ Give a concise, helpful answer."""
             )
 
     # ── Render ────────────────────────────────────────────────────────────
-    if response:
+    if response and response != "__rendered__":
         st.chat_message("assistant").write(response)
+        
+        audio_file = speak_text(str(response).replace("#","").replace("*",""))
+        if audio_file:
+            st.audio(audio_file)
 
     if map_data is not None:
         st.subheader("🗺️ Matching Locations")

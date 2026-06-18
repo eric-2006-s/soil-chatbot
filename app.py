@@ -9,10 +9,16 @@ import folium
 from folium.plugins import HeatMap
 from streamlit_folium import st_folium
 
+from streamlit_mic_recorder import mic_recorder
+from gtts import gTTS
+from deep_translator import GoogleTranslator
+import tempfile
+
+
 # ==========================
 # Groq Setup
 # ==========================
-groq_client = Groq(api_key="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")
+groq_client = Groq(api_key="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")
 
 # ==========================
 # Load Data (Cached)
@@ -186,7 +192,7 @@ def where_grow_crop(query_lower):
     return response, map_df if not map_df.empty else None
 
 # ==========================
-# Heatmap
+# Crop Suitability Heatmap
 # ==========================
 @st.cache_data
 def soil_suitability_heatmap(crop_name):
@@ -205,6 +211,34 @@ def soil_suitability_heatmap(crop_name):
     m = folium.Map(location=center, zoom_start=10, tiles="CartoDB positron")
     HeatMap(
         heat_df[["latitude", "longitude", "weight"]].values.tolist(),
+        min_opacity=0.3,
+        radius=20,
+        blur=15,
+        gradient={"0.3": "#ffffb2", "0.6": "#fd8d3c", "1.0": "#bd0026"}
+    ).add_to(m)
+    folium.LayerControl().add_to(m)
+    return m, None
+
+# ==========================
+# Organic Carbon Heatmap
+# ==========================
+@st.cache_data
+def organic_carbon_heatmap():
+    oc_df = df[["latitude", "longitude", "Organic_Carbon"]].dropna().copy()
+    oc_df["Organic_Carbon"] = pd.to_numeric(oc_df["Organic_Carbon"], errors="coerce")
+    oc_df = oc_df.dropna(subset=["Organic_Carbon"])
+
+    if oc_df.empty:
+        return None, "No numeric organic carbon data available."
+
+    oc_min = oc_df["Organic_Carbon"].min()
+    oc_max = oc_df["Organic_Carbon"].max()
+    oc_df["weight"] = (oc_df["Organic_Carbon"] - oc_min) / (oc_max - oc_min + 1e-9)
+
+    center = [oc_df["latitude"].mean(), oc_df["longitude"].mean()]
+    m = folium.Map(location=center, zoom_start=10, tiles="CartoDB positron")
+    HeatMap(
+        oc_df[["latitude", "longitude", "weight"]].values.tolist(),
         min_opacity=0.3,
         radius=20,
         blur=15,
@@ -532,8 +566,7 @@ else:
 # ==========================
 if "latitude" in record.index and "longitude" in record.index and pd.notna(record["latitude"]) and pd.notna(record["longitude"]):
     st.subheader("📍 Parcel Location")
-    
-    # Zoom level: district=9, village=12, survey=15
+
     if search_mode == "Survey Number":
         district_center = df[df["KGISDistrictName"].astype(str) == selected_district][["latitude","longitude"]].mean()
         village_center  = village_df[["latitude","longitude"]].mean()
@@ -542,21 +575,18 @@ if "latitude" in record.index and "longitude" in record.index and pd.notna(recor
 
         m = folium.Map(location=[survey_lat, survey_lon], zoom_start=15, tiles="CartoDB positron")
 
-        # District boundary marker
         folium.Marker(
             location=[district_center["latitude"], district_center["longitude"]],
             tooltip=selected_district,
             icon=folium.Icon(color="blue", icon="info-sign")
         ).add_to(m)
 
-        # Village marker
         folium.Marker(
             location=[village_center["latitude"], village_center["longitude"]],
             tooltip=selected_village,
             icon=folium.Icon(color="orange", icon="home")
         ).add_to(m)
 
-        # Survey plot marker
         folium.Marker(
             location=[survey_lat, survey_lon],
             tooltip=f"Survey: {record['SurNo_Hissa']}",
@@ -625,10 +655,60 @@ if st.sidebar.button("Compare"):
         st.subheader("🗺️ Plot Locations")
         st.map(map_points)
 
+
+# ==========================
+# Voice Helpers
+# ==========================
+def speak_text(text):
+    try:
+        tts = gTTS(text=str(text))
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
+            tts.save(fp.name)
+            return fp.name
+    except Exception:
+        return None
+
+voice_query = None
+st.subheader("🎤 Voice input")
+audio = mic_recorder(
+    start_prompt="🎙️ Start Recording",
+    stop_prompt="⏹️ Stop Recording",
+    just_once=True,
+    use_container_width=True
+)
+
+if audio:
+    try:
+        st.audio(audio["bytes"])
+        with open("voice.wav", "wb") as f:
+            f.write(audio["bytes"])
+
+        transcription = groq_client.audio.transcriptions.create(
+            file=open("voice.wav", "rb"),
+            model="whisper-large-v3"
+        )
+
+        voice_query = transcription.text
+
+        try:
+            voice_query = GoogleTranslator(
+                source="auto",
+                target="en"
+            ).translate(voice_query)
+        except Exception:
+            pass
+
+        st.success(f"You said: {voice_query}")
+
+    except Exception as e:
+        st.error(f"Voice recognition error: {e}")
+
+
 # ==========================
 # Query Input
 # ==========================
-query = st.text_input("💬 Ask a question about this soil plot")
+text_query = st.text_input("💬 Ask a question about this soil plot")
+query = voice_query if voice_query else text_query
 
 # ==========================
 # Chatbot Logic
@@ -676,17 +756,42 @@ if query:
 
     # ── 4. Heatmap ────────────────────────────────────────────────────────
     elif "heatmap" in query_lower:
-        matched_crop = next((c for c in CROP_MAP if c in query_lower), None)
-        if matched_crop:
-            heatmap_obj, err = soil_suitability_heatmap(matched_crop)
+        # Organic Carbon heatmap
+        if "organic carbon" in query_lower or " oc " in query_lower or query_lower.strip() in ["heatmap oc", "oc heatmap", "organic carbon heatmap", "heatmap organic carbon"]:
+            heatmap_obj, err = organic_carbon_heatmap()
             if heatmap_obj:
-                st.chat_message("assistant").write(f"### 🌡️ Suitability Heatmap: {matched_crop.title()}\n\nRed = Highly Suitable (S1) · Orange = Moderate (S2) · Yellow = Marginal (S3)")
+                st.chat_message("assistant").write(
+                    "### 🌡️ Organic Carbon Heatmap\n\n"
+                    "Red = High OC · Orange = Medium · Yellow = Low\n\n"
+                    f"Range across dataset: {df['Organic_Carbon'].min():.3f} – {df['Organic_Carbon'].max():.3f}"
+                )
                 st_folium(heatmap_obj, width="100%", height=500, returned_objects=[])
                 response = "__rendered__"
             else:
                 response = err
+
+        # Crop suitability heatmap
         else:
-            response = f"Mention a crop name. Example: *heatmap for maize*\n\n**Supported:** {', '.join(sorted(CROP_MAP.keys()))}"
+            matched_crop = next((c for c in CROP_MAP if c in query_lower), None)
+            if matched_crop:
+                heatmap_obj, err = soil_suitability_heatmap(matched_crop)
+                if heatmap_obj:
+                    st.chat_message("assistant").write(
+                        f"### 🌡️ Suitability Heatmap: {matched_crop.title()}\n\n"
+                        "Red = Highly Suitable (S1) · Orange = Moderate (S2) · Yellow = Marginal (S3)"
+                    )
+                    st_folium(heatmap_obj, width="100%", height=500, returned_objects=[])
+                    response = "__rendered__"
+                else:
+                    response = err
+            else:
+                response = (
+                    f"Mention a crop name or 'organic carbon'.\n\n"
+                    f"**Examples:**\n"
+                    f"- *heatmap for maize*\n"
+                    f"- *organic carbon heatmap*\n\n"
+                    f"**Supported crops:** {', '.join(sorted(CROP_MAP.keys()))}"
+                )
 
     # ── 5. Individual crop suitability ────────────────────────────────────
     else:
@@ -739,6 +844,10 @@ Give a concise, helpful answer."""
     # ── Render ────────────────────────────────────────────────────────────
     if response and response != "__rendered__":
         st.chat_message("assistant").write(response)
+        
+        audio_file = speak_text(str(response).replace("#","").replace("*",""))
+        if audio_file:
+            st.audio(audio_file)
 
     if map_data is not None:
         st.subheader("🗺️ Matching Locations")
