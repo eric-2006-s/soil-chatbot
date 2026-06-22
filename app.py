@@ -18,7 +18,9 @@ import tempfile
 # ==========================
 # Groq Setup
 # ==========================
-groq_client = Groq(api_key="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")
+import os
+api_key = st.secrets.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY")
+groq_client = Groq(api_key=api_key)
 
 # ==========================
 # Load Data (Cached)
